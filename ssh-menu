@@ -1,0 +1,883 @@
+#!/usr/bin/perl -w
+
+#########################    MENU ENGINE CODE    #########################
+
+use File::Temp qw/ tempfile /;
+use File::Copy;
+use Data::Dumper;
+
+my $current_menu;
+my $current_index;
+
+sub get_input();
+sub print_edit;
+sub switch_menu($);
+sub switch_menu_back();
+sub set_value;
+sub get_value;
+
+
+#########################    APPLICATION CODE    #########################
+
+my $version = 'v1.0.0';
+
+sub print_help
+{
+	my $msg = "
+This is a simple Perl script for SSH certificate management. 
+It is a wrapper around ssh-keygen tool.
+Features:
+    - make simple CA
+    - make KEY for signing by this or some other CA
+	- sign public KEY by this CA
+    - print KEY or CRT to console
+    
+Keys and certificates are encoded using OpenSSH native format, but they can be inported/exported
+from/to PEM, RFC4716/SSH2 or PKCS8 formats.
+Files will have extensions .key, .pub.key, .key-cert.pub, depending on file type.
+
+CA KEY will be 4096 bit RSA key by default, but it can be any other valid KEY. 
+All other keys will default to 3072 bits RSA keys, but can be any of 1024, 
+2048, 3072, 4096 bits for RSA, 1024 bits for DSA or 256, 384 or 521 bits for ECDSA.
+ECDSA-SK, Ed25519 and Ed25519-SK keys have a fixed length.
+
+";
+    print "ssh-menu version $version\n";
+    print $msg;
+}
+
+
+my $ca_dir = 'CA';
+my $ca_key = 'ca';
+
+
+my %yes_no_menu =
+(
+    'name' => 'Yes / No',
+    'entries' =>
+    [
+        {'name' => 'Yes', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'yes'},
+        {'name' => 'No', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'no'},
+    ],
+);
+
+
+
+my %password_menu =
+(
+    'name' => 'Password',
+    'entries' =>
+    [
+        {'name' => 'Pass', 'sub' => \&set_password, 'arg' => undef},
+    ],
+);
+
+
+my %key_type_menu =
+(
+    'name' => 'Key type menu',
+    'entries' =>
+    [
+        {'name' => 'RSA, 1024 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 1024'},
+        {'name' => 'RSA, 2048 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 2048'},
+        {'name' => 'RSA, 3072 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 3072'},
+        {'name' => 'RSA, 4096 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 4096'},
+		
+		{'name' => 'ECDSA, 256 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ECDSA, 256'},
+        {'name' => 'ECDSA, 384 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ECDSA, 384'},
+        {'name' => 'ECDSA, 521 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ECDSA, 521'},
+
+        {'name' => 'DSA, 1024 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DSA, 1024'},
+        
+        {'name' => 'ED25519', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ED25519'},
+        
+		{'name' => 'ED25519-SK', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ED25519-SK'},
+		
+        {'name' => 'ECDSA-SK', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ECDSA-SK'},
+    ],
+);
+
+
+my %key_menu =
+(
+    'name' => 'Key menu',
+    'entries' =>
+    [
+        {'name' => 'Make key', 'sub' => \&make_new_key, 'arg' => undef},
+        {'name' => 'Set key type', 'sub' => \&switch_menu, 'arg' => \%key_type_menu},
+        {'name' => 'Set password', 'sub' => \&switch_menu, 'arg' => \%password_menu},
+    ],
+);
+
+
+
+my %crt_type_menu =
+(
+    'name' => 'CRT type menu',
+    'entries' =>
+    [
+        {'name' => 'Host', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'host'},
+        {'name' => 'User', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'user'},
+    ],
+);
+
+
+my %ca_type_menu =
+(
+    'name' => 'CA type menu',
+    'entries' =>
+    [
+        {'name' => 'Host', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'host'},
+        {'name' => 'User', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'user'},
+    ],
+);
+
+
+
+my %ca_menu =
+(
+    'name' => 'CA menu',
+    'entries' =>
+    [
+        {'name' => 'Make CA', 'sub' => \&make_new_ca, 'arg' => undef},
+        {'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
+        {'name' => 'CA type', 'sub' => \&switch_menu, 'arg' => \%ca_type_menu},
+    ],
+);
+
+
+
+my %crt_menu =
+(
+    'name' => 'Crt menu',
+    'entries' =>
+    [
+        {'name' => 'Make CRT', 'sub' => \&make_new_crt, 'arg' => undef},
+		{'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
+		{'name' => 'CRT type', 'sub' => \&switch_menu, 'arg' => \%crt_type_menu},
+    ],
+);
+
+
+my %format_menu =
+(
+    'name' => 'Format menu',
+    'entries' =>
+    [
+        {'name' => 'PEM', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'PEM'},
+        {'name' => 'RFC4716/SSH2', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RFC4716'},
+        {'name' => 'PKCS#8', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'PKCS8'},
+    ],
+);
+
+
+my %import_menu =
+(
+    'name' => 'Import menu',
+    'entries' =>
+    [
+        {'name' => 'Import KEY', 'sub' => \&import_key, 'arg' => undef},
+		{'name' => 'Set input format', 'sub' => \&switch_menu, 'arg' => \%format_menu},
+    ],
+);
+
+my %export_menu =
+(
+    'name' => 'Export menu',
+    'entries' =>
+    [
+        {'name' => 'Export KEY', 'sub' => \&export_key, 'arg' => undef},
+		{'name' => 'Set output format', 'sub' => \&switch_menu, 'arg' => \%format_menu},
+    ],
+);
+
+
+my %print_menu = 
+(
+    'name' => 'Print menu',
+    'entries' =>
+    [
+        {'name' => 'Print CRT', 'sub' => \&print_crt, 'arg' => undef},
+        {'name' => 'Print KEY', 'sub' => \&print_key, 'arg' => undef},
+        {'name' => 'Print CA', 'sub' => \&print_ca, 'arg' => undef},
+    ],
+);
+
+
+my %main_menu = 
+(
+    'name' => 'Main menu',
+    'entries' =>
+    [
+        {'name' => 'New CRT', 'sub' => \&switch_menu, 'arg' => \%crt_menu},
+		{'name' => 'New KEY', 'sub' => \&switch_menu, 'arg' => \%key_menu},
+        {'name' => 'Import KEY', 'sub' => \&switch_menu, 'arg' => \%import_menu},
+        {'name' => 'Export KEY', 'sub' => \&switch_menu, 'arg' => \%export_menu},
+        {'name' => 'New CA', 'sub' => \&switch_menu, 'arg' => \%ca_menu},
+        {'name' => 'Print', 'sub' => \&switch_menu, 'arg' => \%print_menu},
+        {'name' => 'Help', 'sub' => \&print_help, 'arg' => undef},
+    ],
+);
+
+
+
+sub set_password
+{
+    my $pass = print_edit('Password');
+    set_value($pass);
+    switch_menu_back();
+}
+
+
+# ask questions and get and return sertificate options as a string
+sub get_host_options
+{
+    my $options = '';
+	
+    print "
+You are about to be asked to enter information that will be incorporated into your certificate.
+If you enter '.', the field will be left blank.
+-----
+";
+
+    my $tmp;
+    
+	$tmp = print_edit('Certificate identity', 'host.example.com');
+	$tmp =~ s/^\s*//;
+	$tmp =~ s/\s*$//;
+	$tmp = undef if($tmp eq '' or $tmp eq '.');
+	if(!$tmp)
+	{
+		print "\nError: Invalid certificate identity!\n";
+        return undef;
+	}
+	$options .= " -I '$tmp'";
+    
+    
+	$tmp = print_edit('List of principals (comma-separated)', 'host.example.com');
+	$tmp =~ s/^\s*//;
+	$tmp =~ s/\s*$//;
+	$tmp = undef if($tmp eq '' or $tmp eq '.');
+	if(!$tmp)
+	{
+		print "\nError: Invalid list of principals!\n";
+        return undef;
+	}
+	$options .= " -n '$tmp'";
+    
+    return $options;
+}
+
+
+# ask questions and get and return sertificate options as a string
+sub get_user_options
+{
+    my $options = '';
+	
+    print "
+You are about to be asked to enter information that will be incorporated into your certificate.
+If you enter '.', the field will be left blank.
+-----
+";
+
+    my $tmp;
+    
+	$tmp = print_edit('Certificate identity', 'someone@example.com');
+	$tmp =~ s/^\s*//;
+	$tmp =~ s/\s*$//;
+	$tmp = undef if($tmp eq '' or $tmp eq '.');
+	if(!$tmp)
+	{
+		print "\nError: Invalid certificate identity!\n";
+        return undef;
+	}
+	$options .= " -I '$tmp'";
+    
+    
+	$tmp = print_edit('List of principals (comma-separated)', 'someone');
+	$tmp =~ s/^\s*//;
+	$tmp =~ s/\s*$//;
+	$tmp = undef if($tmp eq '' or $tmp eq '.');
+	if(!$tmp)
+	{
+		print "\nError: Invalid list of principals!\n";
+        return undef;
+	}
+	$options .= " -n '$tmp'";
+    
+    return $options;
+}
+
+
+sub print_key
+{
+    my $key = shift;
+    
+    $key = print_edit('KEY') if(!$key);
+    if(!$key)
+    {
+        print "\nError: Invalid KEY name '$key'!\n";
+        return undef;
+    }
+    
+    $key = "$key.key" if($key !~ /\.key$/);
+	$key = "$key.pub";
+    
+    if(! -f $key)
+    {
+        print "\nError: Failed to load KEY file '$key'!\n";
+        return undef;
+    }
+    
+    my $cmd = "ssh-keygen -l -f '$key'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd`;
+    print "\n$tmp\n";
+    switch_menu_back();
+    return $key;
+}
+
+
+sub print_ca
+{
+    my $cmd = "ssh-keygen -l -f $ca_dir/$ca_key.user.key.pub";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd`;
+    print "$tmp\n";
+	
+	$cmd = "ssh-keygen -l -f $ca_dir/$ca_key.host.key.pub";
+    print "\nRunning: $cmd\n";
+    $tmp = `$cmd`;
+    print "$tmp\n";
+}
+
+
+sub print_crt
+{
+    my $crt = shift;
+    
+    $crt = print_edit('CRT') if(!$crt);
+    if(!$crt)
+    {
+        print "\nError: Invalid CRT name '$crt'!\n";
+        return undef;
+    }
+    
+    $crt = "$crt.key-cert.pub" if($crt !~ /\.key-cert\.pub$/);
+    
+    if(! -f $crt)
+    {
+        print "\nError: Failed to load CRT file '$crt'!\n";
+        return undef;
+    }
+    
+    my $cmd = "ssh-keygen -L -f '$crt'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd`;
+    print "\n$tmp\n";
+    switch_menu_back();
+    return $crt;
+}
+
+
+
+sub import_key
+{
+    my $inkey = shift;
+    my $infmt = get_value(1) || 'PEM';
+    
+    $inkey = print_edit('Input KEY') if(!$inkey);
+    if(!$inkey)
+    {
+        print "\nError: Invalid KEY name '$inkey'!\n";
+        return undef;
+    }
+	
+	if(! -f $inkey)
+    {
+        print "\nError: Failed to load KEY file '$inkey'!\n";
+        return undef;
+    }
+    
+    my $outkey = print_edit('Output KEY');
+	$outkey = "$outkey.key" if($outkey !~ /\.key$/);
+	
+	if(-f $outkey)
+    {
+        print "\nError: Output KEY file '$inkey' already exists!\n";
+        return undef;
+    }
+    
+    my $cmd = "ssh-keygen -m '$infmt' -i -f '$inkey' > $outkey";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outkey)
+    {
+        print "\nError: Failed to create KEY file '$outkey'!\n";
+        return undef;
+    }
+    
+    print "\nCreated KEY file '$outkey'!\n";
+    switch_menu_back();
+    return $outkey;
+}
+
+
+sub export_key
+{
+    my $inkey = shift;
+    my $outfmt = get_value(1) || 'PEM';
+    
+    $inkey = print_edit('Input KEY') if(!$inkey);
+    if(!$inkey)
+    {
+        print "\nError: Invalid KEY name '$inkey'!\n";
+        return undef;
+    }
+	
+	if($inkey !~ /\.key$/ && $inkey !~ /\.key\.pub$/)
+	{
+		$inkey = "$inkey.key";
+	}
+    
+    if(! -f $inkey)
+    {
+        print "\nError: Failed to load KEY file '$inkey'!\n";
+        return undef;
+    }
+    
+    my $outkey = print_edit('Output KEY');
+	$outkey = "$outkey.key" if($outkey !~ /\.key$/);
+	
+	if(-f $outkey)
+    {
+        print "\nError: Output KEY file '$inkey' already exists!\n";
+        return undef;
+    }
+    
+    my $cmd = "ssh-keygen -m '$outfmt' -e -f '$inkey' > $outkey";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outkey)
+    {
+        print "\nError: Failed to create KEY file '$outkey'!\n";
+        return undef;
+    }
+    
+    print "\nCreated KEY file '$outkey'!\n";
+    switch_menu_back();
+    return $outkey;
+}
+
+
+
+
+sub make_new_key
+{
+    my $key = shift;
+    my ($alg, $len) = split(/, /, get_value(1) || 'RSA, 2048');
+    my $pass = get_value(2) || '';
+    my $pubkey;
+	$len = '' if( not defined($len));
+    
+    # print "\nUsing keylength $len for alg $alg and format $fmt. Pass $pass\n";
+    
+    $key = print_edit('KEY') if(!$key);
+    if(!$key)
+    {
+        print "\nError: Invalid KEY name '$key'!\n";
+        return undef;
+    }
+    
+    if($key =~ /\.key$/){}
+    else { $key = "$key.key"; }
+    
+    if(-f $key)
+    {
+        print "\nError: KEY file '$key' already exists!\n";
+        return undef;
+    }
+    
+    my $opts = '';
+	
+	$alg = lc($alg);
+    
+    if($alg eq 'rsa' or $alg eq 'ecdsa')
+    {
+        $opts .= " -t $alg -b $len";
+    }
+	else
+    {
+        $opts .= " -t $alg";
+    }
+    
+    $opts .= " -N '$pass'";
+    
+    my $cmd = "ssh-keygen $opts -f '$key'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $key)
+    {
+        print "\nError: Failed to create KEY file '$key'!\n";
+        switch_menu_back();
+        return undef;
+    }
+    
+    print "\nCreated KEY file '$key'!\n";
+    
+    switch_menu_back();
+    return $key;
+}
+
+
+
+
+
+sub make_new_ca
+{
+    if(! -d $ca_dir)
+    {
+        mkdir($ca_dir);
+    }
+    
+    my $key = get_value(1);
+    my $type = get_value(2);
+	
+	if($type ne 'user' and $type ne 'host')
+	{
+		print "\nError: Select user or host CA type\n";
+        return undef;
+	}
+	
+	my $cmd;
+	my $tmp;
+	
+    if($key)
+    {
+        if($key !~ /\.key$/){ $key = "$key.key"; }
+        
+        if(! -f $key)
+        {
+            print "\nError: Failed to load KEY file '$key'\n";
+            return undef;
+        }
+		
+		if(! -f "$key.pub")
+        {
+            print "\nError: Failed to load KEY file '$key.pub'\n";
+            return undef;
+        }
+		
+        move($key, "$ca_dir/$ca_key.$type.key");
+        move("$key.pub", "$ca_dir/$ca_key.$type.key.pub");
+        
+		if(! -f "$ca_dir/$ca_key.$type.key")
+        {
+            print "\nError: Failed to move CA KEY file '$key'\n";
+            return undef;
+        }
+		
+		if(! -f "$ca_dir/$ca_key.$type.key.pub")
+        {
+            print "\nError: Failed to move public CA KEY file '$key.pub'\n";
+            return undef;
+        }
+    }
+    else
+    {
+        $cmd = "ssh-keygen -t rsa -b 4096 -N '' -C '${type}_ca' -f '$ca_dir/$ca_key.$type.key'";
+		print "\nRunning: $cmd\n";
+		$tmp = `$cmd 2>&1`;
+		
+		if(! -f "$ca_dir/$ca_key.$type.key")
+        {
+            print "\nError: Failed to create CA KEY file '$key'\n";
+            return undef;
+        }
+		
+		if(! -f "$ca_dir/$ca_key.$type.key.pub")
+        {
+            print "\nError: Failed to create public CA KEY file '$key.pub'\n";
+            return undef;
+        }
+    }
+	
+	set_serial($type, 0);
+    
+    print "\nCreated $type CA key files\n";
+    switch_menu_back();
+    return "$ca_dir/$ca_key.$type.key";
+}
+
+
+
+
+sub make_new_crt
+{
+	# get key name
+    my $name = get_value(1) || '';
+	# get type: user or host
+    my $type = get_value(2) || 'host';
+    my $days;
+    
+	if(!$name)
+	{
+		$name = print_edit('CRT');
+	}
+	
+	my $key = "$name.key.pub";
+	my $crt = "$name.key-cert.pub";
+	
+	if(-f $crt)
+	{
+		print "\nError: CRT file '$crt' already exists\n";
+		return undef;
+	}
+	
+	my $opts;
+	
+	$days = print_edit('Days', '365');
+	if($days !~ /^\d+$/)
+	{
+		print "\nError: Invalid validity days '$days'\n";
+		return undef;
+	}
+	
+	if($type eq 'host')
+	{
+		$opts = get_host_options();
+	}
+	else
+	{
+		$opts = get_user_options();
+	}
+	
+	if(!defined($opts))
+	{
+		print "\nError: Invalid certificate options\n";
+		return undef;
+	}
+	
+	my $serial = get_serial($type);
+	$serial += 1;
+	
+	$opts .= " -z $serial";
+	
+	if($type eq 'host')
+	{
+		$opts .= ' -h';
+	}
+	
+	if(! -f $key)
+	{
+		make_new_key($name);
+		
+		if(! -f $key)
+		{
+			print "\nError: KEY file '$key' does not exists\n";
+			return undef;
+		}
+	}
+	
+	$opts .= ' -V +' . $days . 'd';
+	
+	my $cmd = "ssh-keygen -s $ca_dir/$ca_key.$type.key $opts $key";
+	print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $crt)
+    {
+        print "Error: Failed to create certificate '$crt'!\n";
+        return undef;
+    }
+	
+	set_serial($type, $serial);
+    
+    print "\nCreated certificate '$crt'!\n";
+    switch_menu_back();
+    return $crt;
+}
+
+
+sub get_serial
+{
+	my $type = shift;
+	my $fname = "$ca_dir/$ca_key.$type.serial";
+	my $fh;
+	my $serial = 0;
+	if(-f $fname)
+	{
+		open($fh, '<', $fname);
+		my $line = <$fh>; 
+		close($fh);  
+		$line =~ s/\D//g;
+		$serial = int($line);
+	}
+	return $serial;
+}
+
+
+sub set_serial
+{
+	my $type = shift;
+	my $serial = shift;
+	my $fname = "$ca_dir/$ca_key.$type.serial";
+	my $fh;
+	open($fh, '>', $fname);
+	print $fh "$serial\n";
+	close($fh);  
+}
+
+
+
+###########################   MAIN MENU ENGINE CODE    ###########################
+
+switch_menu(\%main_menu);
+
+my $done = 0;
+
+while(!$done)
+{
+# print "Main Loop, current_menu: ", Dumper($current_menu);
+    
+    # print title
+    my $name = $current_menu->{'name'};
+    my $value = $current_menu->{'value'};
+    if(defined($value)) { print "\n$name ($value)\n"; }
+    else { print "\n$name \n"; }
+    
+    # print entries
+    my $i;
+    $entries = $current_menu->{'entries'};
+    my $limit = @{$entries};
+    
+    for($i = 0; $i < $limit; $i++)
+    {
+        $name = $entries->[$i]{'name'};
+        $value = $entries->[$i]{'value'};
+        if(defined($value)) { printf("% 2d: %s (%s)\n", $i + 1, $name, $value); }
+        else { printf("% 2d: %s\n", $i + 1, $name); }
+    }
+    printf(" q: Back\n");
+    
+    print " --> ";
+    
+    # make choice
+    my $choice;
+    while(!$done)
+    {
+        $choice = get_input();
+        last if($choice eq "q");
+        last if($choice =~ /^\d+$/o and $choice <= $limit);
+        print "Invalid Choice!\n --> ";
+    }
+    print "\n";
+
+    # we have valid choice in $choice
+    if($choice eq 'q')
+    {
+        print "\n";
+        # my $parent = $current_menu->{'parent'};
+        # last if(! $parent);
+        # $current_menu = $parent;
+        last if(! switch_menu_back());
+        next;
+    }
+    $current_index = $choice - 1;
+    $current_menu->{'current_index'} = $current_index;
+    my $sub = $entries->[$current_index]{'sub'};
+    my $arg = $entries->[$current_index]{'arg'};
+    (\&$sub)->($arg);
+}
+
+
+
+# get user input and chop off the newline
+sub get_input()
+{
+    my $input = '';
+    chomp($input = <STDIN>);
+    return $input;
+}
+
+# print text and get user input
+# if no input return second argument (default value)
+sub print_edit
+{
+    my $text = shift;
+    my $default = shift;
+    
+    if(defined $default) { $text .= " [$default]"; }
+    else { $default = ''; }
+    
+    print "$text: --> ";
+    
+    $text = get_input();
+    return $text if($text ne '');
+    return $default;
+}
+
+
+sub switch_menu($)
+{
+    my $new_menu = shift;
+    $new_menu->{'parent'} = $current_menu;
+    $current_menu = $new_menu;
+}
+
+
+sub switch_menu_back()
+{
+    my $parent = $current_menu->{'parent'};
+    return undef if(!$parent);
+    $current_menu = $parent;
+    return 1;
+}
+
+
+
+sub set_value
+{
+    my $val = shift;
+    my $menu = shift || $current_menu->{'parent'};
+    
+    return if(! $menu);
+    
+    my $i;
+    my $entries = $menu->{'entries'};
+=pod
+    my $limit = @{$entries};
+    
+    for($i = 0; $i < $limit; $i++)
+    {
+        $entries->[$i]{'value'} = undef;
+    }
+=cut
+    $i = $menu->{'current_index'};
+    $entries->[$i]{'value'} = $val;
+}
+
+
+
+sub get_value_from_menu
+{
+    my $menu = shift;
+    my $argc = @_;
+    my $i = shift;
+    my $entries = $menu->{'entries'};
+    if($argc == 1)
+    {
+        return $entries->[$i]{'value'} || '';
+    }
+
+    return get_value_from_menu($entries->[$i]{'arg'}, @_);
+}
+
+
+sub get_value
+{
+    return get_value_from_menu($current_menu, @_);
+}
