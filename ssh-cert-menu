@@ -6,8 +6,14 @@ use File::Temp qw/ tempfile /;
 use File::Copy;
 use Data::Dumper;
 
+my $version = 'v1.1.0';
+my $type = 'host';
+
 my $current_menu;
 my $current_index;
+
+my $ca_dir = 'CA';
+my $ca_key = 'ca';
 
 sub get_input();
 sub print_edit;
@@ -17,14 +23,35 @@ sub set_value;
 sub get_value;
 
 
-#########################    APPLICATION CODE    #########################
+$type = 'host' if($0 =~ /ssh-host-cert-menu$/);
+$type = 'user' if($0 =~ /ssh-user-cert-menu$/);
 
-my $version = 'v1.0.0';
+if($ARGV[0])
+{
+	$type = 'host' if($ARGV[0] eq 'host');
+	$type = 'user' if($ARGV[0] eq 'user');
+	if($ARGV[0] eq 'install')
+	{
+		my $cmd;
+		my $tmp;
+		$cmd = "chmod +x $0";
+		$tmp = `$cmd`;
+		$cmd = "cp $0 /usr/local/bin/ssh-host-cert-menu";
+		$tmp = `$cmd`;
+		$cmd = "cd /usr/local/bin; ln -s /usr/local/bin/ssh-host-cert-menu ssh-user-cert-menu; cd -";
+		$tmp = `$cmd`;
+		print "Installed in /usr/local/bin\n";
+		return 0;
+	}
+}
+
+
+#########################    APPLICATION CODE    #########################
 
 sub print_help
 {
 	my $msg = "
-This is a simple Perl script for SSH certificate management. 
+This is a simple Perl script for SSH $type certificate management. 
 It is a wrapper around ssh-keygen tool.
 Features:
     - make simple CA
@@ -34,7 +61,7 @@ Features:
     
 Keys and certificates are encoded using OpenSSH native format, but they can be inported/exported
 from/to PEM, RFC4716/SSH2 or PKCS8 formats.
-Files will have extensions .key, .pub.key, .key-cert.pub, depending on file type.
+Files will have no extensions but it will end with _key, _key.pub, _key-cert.pub, depending on file type.
 
 CA KEY will be 4096 bit RSA key by default, but it can be any other valid KEY. 
 All other keys will default to 3072 bits RSA keys, but can be any of 1024, 
@@ -42,13 +69,9 @@ All other keys will default to 3072 bits RSA keys, but can be any of 1024,
 ECDSA-SK, Ed25519 and Ed25519-SK keys have a fixed length.
 
 ";
-    print "ssh-menu version $version\n";
+    print "ssh-$type-menu version $version\n";
     print $msg;
 }
-
-
-my $ca_dir = 'CA';
-my $ca_key = 'ca';
 
 
 my %yes_no_menu =
@@ -122,18 +145,6 @@ my %crt_type_menu =
 );
 
 
-my %ca_type_menu =
-(
-    'name' => 'CA type menu',
-    'entries' =>
-    [
-        {'name' => 'Host', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'host'},
-        {'name' => 'User', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'user'},
-    ],
-);
-
-
-
 my %ca_menu =
 (
     'name' => 'CA menu',
@@ -141,7 +152,6 @@ my %ca_menu =
     [
         {'name' => 'Make CA', 'sub' => \&make_new_ca, 'arg' => undef},
         {'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
-        {'name' => 'CA type', 'sub' => \&switch_menu, 'arg' => \%ca_type_menu},
     ],
 );
 
@@ -154,7 +164,6 @@ my %crt_menu =
     [
         {'name' => 'Make CRT', 'sub' => \&make_new_crt, 'arg' => undef},
 		{'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
-		{'name' => 'CRT type', 'sub' => \&switch_menu, 'arg' => \%crt_type_menu},
     ],
 );
 
@@ -320,8 +329,15 @@ sub print_key
         return undef;
     }
     
-    $key = "$key.key" if($key !~ /\.key$/);
-	$key = "$key.pub";
+    if($key =~ /\_key\.pub$/) { }
+	elsif($key =~ /\_key$/)
+	{
+		$key = "$key.pub"
+	}
+    else
+	{
+		$key = "${key}_key.pub";
+	}
     
     if(! -f $key)
     {
@@ -340,15 +356,10 @@ sub print_key
 
 sub print_ca
 {
-    my $cmd = "ssh-keygen -l -f $ca_dir/$ca_key.user.key.pub";
-    print "\nRunning: $cmd\n";
-    my $tmp = `$cmd`;
-    print "$tmp\n";
-	
-	$cmd = "ssh-keygen -l -f $ca_dir/$ca_key.host.key.pub";
-    print "\nRunning: $cmd\n";
-    $tmp = `$cmd`;
-    print "$tmp\n";
+	my $cmd = "ssh-keygen -l -f $ca_dir/${ca_key}_${type}_key.pub";
+	print "\nRunning: $cmd\n";
+	my $tmp = `$cmd`;
+	print "$tmp\n";
 }
 
 
@@ -363,7 +374,20 @@ sub print_crt
         return undef;
     }
     
-    $crt = "$crt.key-cert.pub" if($crt !~ /\.key-cert\.pub$/);
+	if($crt =~ /\_key-cert\.pub$/) { }
+	elsif($crt =~ /\_key-cert$/)
+	{
+		$crt = "$crt.pub";
+	}
+	elsif($crt =~ /\_key$/)
+	{
+		$crt = "$crt-cert.pub";
+	}
+	else
+	{
+		$crt = "${crt}_key-cert.pub";
+	}
+    
     
     if(! -f $crt)
     {
@@ -380,7 +404,7 @@ sub print_crt
 }
 
 
-
+# importing key == converting it from some other format to native openssh format
 sub import_key
 {
     my $inkey = shift;
@@ -400,11 +424,14 @@ sub import_key
     }
     
     my $outkey = print_edit('Output KEY');
-	$outkey = "$outkey.key" if($outkey !~ /\.key$/);
+	if($outkey !~ /_key$/ && $outkey !~ /_key\.pub$/)
+	{
+		$outkey = "${outkey}_key";
+	}
 	
 	if(-f $outkey)
     {
-        print "\nError: Output KEY file '$inkey' already exists!\n";
+        print "\nError: Output KEY file '$outkey' already exists!\n";
         return undef;
     }
     
@@ -424,6 +451,7 @@ sub import_key
 }
 
 
+# exporting key == converting it from native openssh format to some other format
 sub export_key
 {
     my $inkey = shift;
@@ -436,9 +464,9 @@ sub export_key
         return undef;
     }
 	
-	if($inkey !~ /\.key$/ && $inkey !~ /\.key\.pub$/)
+	if($inkey !~ /_key$/ && $inkey !~ /_key\.pub$/)
 	{
-		$inkey = "$inkey.key";
+		$inkey = "${inkey}_key";
 	}
     
     if(! -f $inkey)
@@ -448,7 +476,10 @@ sub export_key
     }
     
     my $outkey = print_edit('Output KEY');
-	$outkey = "$outkey.key" if($outkey !~ /\.key$/);
+	if($outkey !~ /_key$/ && $outkey !~ /_key\.pub$/)
+	{
+		$outkey = "${outkey}_key";
+	}
 	
 	if(-f $outkey)
     {
@@ -491,8 +522,15 @@ sub make_new_key
         return undef;
     }
     
-    if($key =~ /\.key$/){}
-    else { $key = "$key.key"; }
+	if($key =~ /_key\.pub$/)
+	{
+		$key =~ s/\.pub$//;
+	}
+    if($key =~ /_key$/){}
+    else
+	{
+		$key = "${key}_key";
+	}
     
     if(-f $key)
     {
@@ -544,20 +582,13 @@ sub make_new_ca
     }
     
     my $key = get_value(1);
-    my $type = get_value(2);
-	
-	if($type ne 'user' and $type ne 'host')
-	{
-		print "\nError: Select user or host CA type\n";
-        return undef;
-	}
 	
 	my $cmd;
 	my $tmp;
 	
     if($key)
     {
-        if($key !~ /\.key$/){ $key = "$key.key"; }
+        if($key !~ /\_key$/){ $key = "${key}_key"; }
         
         if(! -f $key)
         {
@@ -571,16 +602,16 @@ sub make_new_ca
             return undef;
         }
 		
-        move($key, "$ca_dir/$ca_key.$type.key");
-        move("$key.pub", "$ca_dir/$ca_key.$type.key.pub");
+        move($key, "$ca_dir/${ca_key}_${type}_key");
+        move("$key.pub", "$ca_dir/${ca_key}_${type}_key.pub");
         
-		if(! -f "$ca_dir/$ca_key.$type.key")
+		if(! -f "$ca_dir/${ca_key}_${type}_key")
         {
             print "\nError: Failed to move CA KEY file '$key'\n";
             return undef;
         }
 		
-		if(! -f "$ca_dir/$ca_key.$type.key.pub")
+		if(! -f "$ca_dir/${ca_key}_${type}_key.pub")
         {
             print "\nError: Failed to move public CA KEY file '$key.pub'\n";
             return undef;
@@ -588,17 +619,17 @@ sub make_new_ca
     }
     else
     {
-        $cmd = "ssh-keygen -t rsa -b 4096 -N '' -C '${type}_ca' -f '$ca_dir/$ca_key.$type.key'";
+        $cmd = "ssh-keygen -t rsa -b 4096 -N '' -C '${type}_ca' -f '$ca_dir/${ca_key}_${type}_key'";
 		print "\nRunning: $cmd\n";
 		$tmp = `$cmd 2>&1`;
 		
-		if(! -f "$ca_dir/$ca_key.$type.key")
+		if(! -f "$ca_dir/${ca_key}_${type}_key")
         {
             print "\nError: Failed to create CA KEY file '$key'\n";
             return undef;
         }
 		
-		if(! -f "$ca_dir/$ca_key.$type.key.pub")
+		if(! -f "$ca_dir/${ca_key}_${type}_key.pub")
         {
             print "\nError: Failed to create public CA KEY file '$key.pub'\n";
             return undef;
@@ -609,7 +640,7 @@ sub make_new_ca
     
     print "\nCreated $type CA key files\n";
     switch_menu_back();
-    return "$ca_dir/$ca_key.$type.key";
+    return "$ca_dir/${ca_key}_${type}_key";
 }
 
 
@@ -619,17 +650,33 @@ sub make_new_crt
 {
 	# get key name
     my $name = get_value(1) || '';
-	# get type: user or host
-    my $type = get_value(2) || 'host';
-    my $days;
+	my $days;
     
 	if(!$name)
 	{
 		$name = print_edit('CRT');
 	}
 	
-	my $key = "$name.key.pub";
-	my $crt = "$name.key-cert.pub";
+	my $key;
+	my $crt;
+	
+	if($name =~ /_key\.pub$/)
+	{
+		$key = $name;
+		$name =~ s/\.pub$//;
+		$crt = "$name-cert.pub";
+	}
+	elsif($name =~ /_key$/)
+	{
+		$key = "$name.pub";;
+		$crt = "$name-cert.pub";
+	}
+	else
+	{
+		$key = "${name}_key.pub";
+		$crt = "${name}_key-cert.pub";
+	}
+	
 	
 	if(-f $crt)
 	{
@@ -666,10 +713,9 @@ sub make_new_crt
 	
 	$opts .= " -z $serial";
 	
-	if($type eq 'host')
-	{
-		$opts .= ' -h';
-	}
+	$opts .= ' -h' if($type eq 'host');
+	
+	$opts .= ' -V +' . $days . 'd';
 	
 	if(! -f $key)
 	{
@@ -682,9 +728,7 @@ sub make_new_crt
 		}
 	}
 	
-	$opts .= ' -V +' . $days . 'd';
-	
-	my $cmd = "ssh-keygen -s $ca_dir/$ca_key.$type.key $opts $key";
+	my $cmd = "ssh-keygen -s $ca_dir/${ca_key}_${type}_key $opts $key";
 	print "\nRunning: $cmd\n";
     my $tmp = `$cmd 2>&1`;
     
@@ -705,7 +749,7 @@ sub make_new_crt
 sub get_serial
 {
 	my $type = shift;
-	my $fname = "$ca_dir/$ca_key.$type.serial";
+	my $fname = "$ca_dir/${ca_key}_${type}.serial";
 	my $fh;
 	my $serial = 0;
 	if(-f $fname)
@@ -724,7 +768,7 @@ sub set_serial
 {
 	my $type = shift;
 	my $serial = shift;
-	my $fname = "$ca_dir/$ca_key.$type.serial";
+	my $fname = "$ca_dir/${ca_key}_${type}.serial";
 	my $fh;
 	open($fh, '>', $fname);
 	print $fh "$serial\n";
@@ -807,17 +851,42 @@ sub get_input()
 # if no input return second argument (default value)
 sub print_edit
 {
-    my $text = shift;
+    my $name = shift;
     my $default = shift;
+	
+    if(defined $default)
+	{
+		$name .= " [$default]";
+	}
+    else
+	{
+		$default = '';
+	}
     
-    if(defined $default) { $text .= " [$default]"; }
-    else { $default = ''; }
+	my $text;
+	
+	while(1)
+	{
+		print "$name: --> ";
     
-    print "$text: --> ";
+		$text = get_input();
+		if($text =~ /\t$/)
+		{
+			$text =~ s/\t$//;
+			@files = glob("${text}*");
+			foreach my $f (@files)
+			{
+				print "$f\n" if $f;
+			}
+		}
+		else
+		{
+			last;
+		}
+	}
     
-    $text = get_input();
-    return $text if($text ne '');
-    return $default;
+    $text = $default if($text eq '');
+    return $text;
 }
 
 
