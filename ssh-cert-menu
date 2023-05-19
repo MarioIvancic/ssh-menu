@@ -6,7 +6,7 @@ use File::Temp qw/ tempfile /;
 use File::Copy;
 use Data::Dumper;
 
-my $version = 'v1.1.0';
+my $version = 'v1.1.1';
 my $type = 'host';
 
 my $current_menu;
@@ -41,7 +41,7 @@ if($ARGV[0])
 		$cmd = "cd /usr/local/bin; ln -s /usr/local/bin/ssh-host-cert-menu ssh-user-cert-menu; cd -";
 		$tmp = `$cmd`;
 		print "Installed in /usr/local/bin\n";
-		return 0;
+		exit 0;
 	}
 }
 
